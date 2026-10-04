@@ -1,26 +1,31 @@
 import datetime
+import io
+import os
 from collections import defaultdict
 from typing import List
 
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
+from PIL import Image
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
-from PIL import Image
-import io
 
+import auth
+import models
+import schemas
+from agent import analyze_weekly_trend, chat_with_ai, fallback_rule_based_analysis
 from database import engine, get_db
-import models, schemas, auth
 from ml.predictor import predict_food
-from scheduler import start_scheduler, aggregate_weekly_data
+from scheduler import aggregate_weekly_data, start_scheduler
 
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
 
-import os
-
+# --- CẤU HÌNH CORS CHO PHÉP VERCEL & LOCALHOST ---
 origins = [
+    "https://nutrition-ai-system.vercel.app",
     "http://localhost:5173",
+    "http://localhost:3000",
     os.getenv("FRONTEND_URL", ""),
 ]
 
@@ -42,6 +47,7 @@ def on_startup():
 def root():
     return {"status": "ok"}
 
+
 def calculate_daily_goal(user: models.User) -> int:
     if not user.weight_kg or not user.height_cm:
         return 2000
@@ -55,9 +61,12 @@ def calculate_daily_goal(user: models.User) -> int:
 
 # ---------- AUTH ----------
 
+
 @app.post("/register", response_model=schemas.UserOut)
 def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
-    existing = db.query(models.User).filter(models.User.email == user.email).first()
+    existing = (
+        db.query(models.User).filter(models.User.email == user.email).first()
+    )
     if existing:
         raise HTTPException(status_code=400, detail="Email đã được sử dụng")
 
@@ -75,15 +84,22 @@ def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
 
 @app.post("/login", response_model=schemas.Token)
 def login(user: schemas.UserLogin, db: Session = Depends(get_db)):
-    db_user = db.query(models.User).filter(models.User.email == user.email).first()
-    if not db_user or not auth.verify_password(user.password, db_user.password_hash):
-        raise HTTPException(status_code=401, detail="Email hoặc mật khẩu không đúng")
+    db_user = (
+        db.query(models.User).filter(models.User.email == user.email).first()
+    )
+    if not db_user or not auth.verify_password(
+        user.password, db_user.password_hash
+    ):
+        raise HTTPException(
+            status_code=401, detail="Email hoặc mật khẩu không đúng"
+        )
 
     token = auth.create_access_token({"sub": str(db_user.id)})
     return {"access_token": token}
 
 
 # ---------- NHẬN DIỆN MÓN ĂN ----------
+
 
 @app.post("/predict")
 async def predict(
@@ -101,7 +117,7 @@ async def predict(
             "food_name": food_name,
             "confidence": confidence,
             "nutrition": None,
-            "note": "Không tìm thấy thông tin dinh dưỡng cho món này trong database"
+            "note": "Không tìm thấy thông tin dinh dưỡng cho món này trong database",
         }
 
     return {
@@ -112,11 +128,12 @@ async def predict(
             "protein_g": food.protein_g,
             "fat_g": food.fat_g,
             "carbs_g": food.carbs_g,
-        }
+        },
     }
 
 
 # ---------- NHẬT KÝ BỮA ĂN ----------
+
 
 @app.post("/meal-logs", response_model=schemas.MealLogOut)
 def create_meal_log(
@@ -145,7 +162,11 @@ def get_my_meal_logs(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
-    return db.query(models.MealLog).filter(models.MealLog.user_id == current_user.id).all()
+    return (
+        db.query(models.MealLog)
+        .filter(models.MealLog.user_id == current_user.id)
+        .all()
+    )
 
 
 @app.post("/meal-logs/from-photo", response_model=schemas.MealLogOut)
@@ -154,9 +175,13 @@ def create_meal_log_from_photo(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
-    food = db.query(models.Food).filter(models.Food.name == log.food_name).first()
+    food = (
+        db.query(models.Food).filter(models.Food.name == log.food_name).first()
+    )
     if not food:
-        raise HTTPException(status_code=404, detail="Không tìm thấy món ăn trong database")
+        raise HTTPException(
+            status_code=404, detail="Không tìm thấy món ăn trong database"
+        )
 
     new_log = models.MealLog(
         user_id=current_user.id,
@@ -171,6 +196,7 @@ def create_meal_log_from_photo(
 
 
 # ---------- DASHBOARD ----------
+
 
 @app.get("/dashboard/daily-summary")
 def get_daily_summary(
@@ -187,16 +213,22 @@ def get_daily_summary(
     )
 
     portion_multiplier = {"nhỏ": 0.7, "vừa": 1.0, "lớn": 1.4}
-    daily_totals = defaultdict(lambda: {"calories": 0, "protein": 0, "fat": 0, "carbs": 0})
+    daily_totals = defaultdict(
+        lambda: {"calories": 0, "protein": 0, "fat": 0, "carbs": 0}
+    )
 
     for log in logs:
-        food = db.query(models.Food).filter(models.Food.id == log.food_id).first()
+        food = (
+            db.query(models.Food).filter(models.Food.id == log.food_id).first()
+        )
         if not food:
             continue
         date_key = log.logged_at.strftime("%Y-%m-%d")
         multiplier = portion_multiplier.get(log.portion_size, 1.0)
 
-        daily_totals[date_key]["calories"] += food.calories_per_100g * multiplier
+        daily_totals[date_key]["calories"] += (
+            food.calories_per_100g * multiplier
+        )
         daily_totals[date_key]["protein"] += food.protein_g * multiplier
         daily_totals[date_key]["fat"] += food.fat_g * multiplier
         daily_totals[date_key]["carbs"] += food.carbs_g * multiplier
@@ -208,13 +240,13 @@ def get_daily_summary(
     return result
 
 
-# ---------- TEST AUTOMATION (tạm thời, để test job không cần chờ tới Chủ nhật) ----------
+# ---------- TEST AUTOMATION ----------
+
 
 @app.post("/test-weekly-job")
 def test_weekly_job():
     aggregate_weekly_data()
     return {"status": "đã chạy job tổng hợp tuần, xem log trong Terminal"}
-
 
 
 @app.get("/weekly-plans/latest")
@@ -233,6 +265,7 @@ def get_latest_weekly_plan(
         return {"exists": False}
 
     import json
+
     content = json.loads(plan.content)
 
     return {
@@ -244,13 +277,14 @@ def get_latest_weekly_plan(
     }
 
 
-
 @app.get("/dashboard/today-summary")
 def get_today_summary(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
-    today_start = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start = datetime.datetime.utcnow().replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
 
     logs = (
         db.query(models.MealLog)
@@ -264,7 +298,9 @@ def get_today_summary(
     meal_count = len(logs)
 
     for log in logs:
-        food = db.query(models.Food).filter(models.Food.id == log.food_id).first()
+        food = (
+            db.query(models.Food).filter(models.Food.id == log.food_id).first()
+        )
         if not food:
             continue
         multiplier = portion_multiplier.get(log.portion_size, 1.0)
@@ -278,6 +314,7 @@ def get_today_summary(
         "remaining": round(daily_goal - total_calories, 0),
     }
 
+
 @app.get("/admin/users")
 def admin_get_all_users(
     db: Session = Depends(get_db),
@@ -286,7 +323,11 @@ def admin_get_all_users(
     users = db.query(models.User).all()
     result = []
     for u in users:
-        log_count = db.query(models.MealLog).filter(models.MealLog.user_id == u.id).count()
+        log_count = (
+            db.query(models.MealLog)
+            .filter(models.MealLog.user_id == u.id)
+            .count()
+        )
         result.append({
             "id": u.id,
             "email": u.email,
@@ -311,9 +352,11 @@ def admin_get_stats(
         "total_plans": total_plans,
     }
 
+
 @app.get("/me", response_model=schemas.UserOut)
 def get_me(current_user: models.User = Depends(auth.get_current_user)):
     return current_user
+
 
 @app.put("/me", response_model=schemas.UserOut)
 def update_me(
@@ -331,6 +374,7 @@ def update_me(
     db.refresh(current_user)
     return current_user
 
+
 @app.get("/meal-logs/history")
 def get_meal_history(
     date: str = None,
@@ -338,13 +382,18 @@ def get_meal_history(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
-    query = db.query(models.MealLog).filter(models.MealLog.user_id == current_user.id)
+    query = db.query(models.MealLog).filter(
+        models.MealLog.user_id == current_user.id
+    )
 
     if date:
         try:
             day_start = datetime.datetime.strptime(date, "%Y-%m-%d")
             day_end = day_start + datetime.timedelta(days=1)
-            query = query.filter(models.MealLog.logged_at >= day_start, models.MealLog.logged_at < day_end)
+            query = query.filter(
+                models.MealLog.logged_at >= day_start,
+                models.MealLog.logged_at < day_end,
+            )
         except ValueError:
             pass
 
@@ -355,7 +404,9 @@ def get_meal_history(
 
     result = []
     for log in logs:
-        food = db.query(models.Food).filter(models.Food.id == log.food_id).first()
+        food = (
+            db.query(models.Food).filter(models.Food.id == log.food_id).first()
+        )
         result.append({
             "id": log.id,
             "food_name": food.name if food else "Không rõ",
@@ -365,7 +416,6 @@ def get_meal_history(
         })
     return result
 
-from agent import chat_with_ai
 
 @app.post("/chat", response_model=schemas.ChatResponse)
 def chat(
@@ -373,7 +423,9 @@ def chat(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
-    today_start = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start = datetime.datetime.utcnow().replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
     logs = (
         db.query(models.MealLog)
         .filter(models.MealLog.user_id == current_user.id)
@@ -383,7 +435,9 @@ def chat(
 
     eaten_today = []
     for log in logs:
-        food = db.query(models.Food).filter(models.Food.id == log.food_id).first()
+        food = (
+            db.query(models.Food).filter(models.Food.id == log.food_id).first()
+        )
         if food:
             eaten_today.append(f"{food.name} ({log.portion_size})")
 
@@ -397,6 +451,7 @@ def chat(
     reply = chat_with_ai(req.message, context, history_list)
     return {"reply": reply}
 
+
 @app.get("/foods", response_model=List[schemas.FoodOut])
 def list_foods(q: str = "", db: Session = Depends(get_db)):
     query = db.query(models.Food)
@@ -404,8 +459,6 @@ def list_foods(q: str = "", db: Session = Depends(get_db)):
         query = query.filter(models.Food.name.ilike(f"%{q}%"))
     return query.order_by(models.Food.name).all()
 
-
-from agent import analyze_weekly_trend, fallback_rule_based_analysis
 
 @app.get("/dashboard/ai-analysis")
 def get_ai_analysis(
@@ -421,18 +474,29 @@ def get_ai_analysis(
     )
 
     if not logs:
-        return {"analysis": "Chưa có đủ dữ liệu để phân tích. Hãy ghi nhận thêm vài bữa ăn nhé!"}
+        return {
+            "analysis": (
+                "Chưa có đủ dữ liệu để phân tích. Hãy ghi nhận thêm vài bữa"
+                " ăn nhé!"
+            )
+        }
 
     portion_multiplier = {"nhỏ": 0.7, "vừa": 1.0, "lớn": 1.4}
-    daily_totals = defaultdict(lambda: {"calories": 0, "protein": 0, "fat": 0, "carbs": 0})
+    daily_totals = defaultdict(
+        lambda: {"calories": 0, "protein": 0, "fat": 0, "carbs": 0}
+    )
 
     for log in logs:
-        food = db.query(models.Food).filter(models.Food.id == log.food_id).first()
+        food = (
+            db.query(models.Food).filter(models.Food.id == log.food_id).first()
+        )
         if not food:
             continue
         date_key = log.logged_at.strftime("%Y-%m-%d")
         multiplier = portion_multiplier.get(log.portion_size, 1.0)
-        daily_totals[date_key]["calories"] += food.calories_per_100g * multiplier
+        daily_totals[date_key]["calories"] += (
+            food.calories_per_100g * multiplier
+        )
         daily_totals[date_key]["protein"] += food.protein_g * multiplier
         daily_totals[date_key]["fat"] += food.fat_g * multiplier
         daily_totals[date_key]["carbs"] += food.carbs_g * multiplier
@@ -449,23 +513,3 @@ def get_ai_analysis(
         analysis = fallback_rule_based_analysis(daily_data)
 
     return {"analysis": analysis}
-
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-
-app = FastAPI()
-
-# Cấu hình CORS cho phép Vercel truy cập
-origins = [
-    "https://nutrition-ai-system.vercel.app",
-    "http://localhost:3000",
-    "http://localhost:5173",  # Nếu dùng Vite
-]
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,       # Hoặc dùng ["*"] để cho phép tất cả các domain
-    allow_credentials=True,
-    allow_methods=["*"],         # Cho phép tất cả phương thức HTTP (POST, GET, PUT, DELETE, OPTIONS)
-    allow_headers=["*"],         # Cho phép tất cả các Header
-)
