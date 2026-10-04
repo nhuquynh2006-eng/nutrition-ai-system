@@ -449,3 +449,23 @@ def get_ai_analysis(
         analysis = fallback_rule_based_analysis(daily_data)
 
     return {"analysis": analysis}
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+app = FastAPI()
+
+# Cấu hình CORS cho phép Vercel truy cập
+origins = [
+    "https://nutrition-ai-system.vercel.app",
+    "http://localhost:3000",
+    "http://localhost:5173",  # Nếu dùng Vite
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,       # Hoặc dùng ["*"] để cho phép tất cả các domain
+    allow_credentials=True,
+    allow_methods=["*"],         # Cho phép tất cả phương thức HTTP (POST, GET, PUT, DELETE, OPTIONS)
+    allow_headers=["*"],         # Cho phép tất cả các Header
+)
